@@ -1,0 +1,1157 @@
+---
+title: "Capuchin monkeys are sensitive to absolute and relative payoffs when deciding to cooperate"
+output: word_document
+date: "2026-07-26"
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Install your Packages}
+#install.packages("rstudioapi")
+#install.packages("openxlsx")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("tidyverse")
+#install.packages("pscl")
+#install.packages("multcomp")
+#install.packages("lsmeans")
+#install.packages("fitdistrplus")
+#install.packages("glmmTMB")
+#install.packages("overdisp")
+#install.packages("sjPlot")
+#install.packages("Rmisc")
+#install.packages("rstatix")
+#install.packages("MASS")
+#install.packages("boot")
+```
+
+```{r}
+detach("package:Rmisc")
+detach("package:plyr")
+```
+
+```{r}
+library(rstudioapi)
+library(openxlsx)
+library(readxl)
+library(emmeans)
+library(lme4)
+library(car)
+library(gridExtra)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+```
+
+
+```{r}
+current_path <- getActiveDocumentContext()$path 
+setwd(dirname(current_path))
+print(getwd())
+```
+
+
+```{r Read the Data File}
+exp.data <- read_excel("Study_1_Data_Cleaned.xlsx", guess_max = 5000)
+
+demographics <- read_excel("dyad_attributes.xlsx", guess_max = 50)
+
+exp.data$session_number <- as.factor(exp.data$session_number)
+exp.data$exp <- as.factor(exp.data$exp)
+exp.data$subject <- as.factor(exp.data$subject)
+exp.data$partner <- as.factor(exp.data$partner)
+exp.data$condition <- as.factor(exp.data$condition)
+exp.data$condition <- relevel(exp.data$condition, ref = "PA")
+exp.data$total_trial <- as.numeric(exp.data$total_trial)
+exp.data$trial <- as.numeric(exp.data$trial)
+exp.data$trial_type <- as.factor(exp.data$trial_type)
+exp.data$equity <- as.factor(exp.data$equity)
+exp.data$tray <- as.character(exp.data$tray)
+exp.data$success <- as.factor(exp.data$success)
+exp.data$subject_eat <- as.factor(exp.data$subject_eat)
+exp.data$partner_eat <- as.factor(exp.data$partner_eat)
+exp.data$choice_switch <- as.factor(exp.data$choice_switch)
+exp.data$give_up <- as.factor(exp.data$give_up)
+exp.data$subject_hand <- as.factor(exp.data$subject_hand)
+exp.data$partner_hand <- as.factor(exp.data$partner_hand)
+exp.data$subject_refusal <- as.factor(exp.data$subject_refusal)
+exp.data$partner_refusal <- as.factor(exp.data$partner_refusal)
+exp.data$CSI <- as.numeric(exp.data$CSI)
+exp.data$rank_relative <- as.factor(exp.data$rank_relative)
+exp.data$kin <- as.factor(exp.data$kin)
+exp.data$dyad_sex <- as.factor(exp.data$dyad_sex)
+
+```
+
+```{r Divide Data into Exp 1 and Exp 2 Data}
+# Experiment 1 Data only
+exp.1.data <- subset(exp.data, exp == 1)
+
+# These variable only pertains to Exp 2, so remove them
+exp.1.data <- exp.1.data %>%
+  select(-dyad_exp1_PP_coop_prop)
+
+exp.1.data <- exp.1.data %>%
+  select(-n_trials_exp1_PP)
+
+write.xlsx(exp.1.data, "Exp_1_Data_Cleaned.xlsx")
+# Experiment 2 Data only
+exp.2.data <- subset(exp.data, exp == 2)
+
+exp.2.data <- subset(exp.2.data, trial_type != "solo_only")
+
+exp.2.data <- exp.2.data %>% 
+  filter(!trial_type %in% c("solo_only", "joint_only", "exp"))
+
+write.xlsx(exp.2.data, "Exp_2_Data_Cleaned.xlsx")
+
+```
+
+
+```{r Descriptives}
+# How many trials did each subject complete
+exp.data %>%
+  group_by(subject) %>%
+  summarise(n_trials = max(total_trial_subject, na.rm = TRUE))
+
+# How many trials each option was selected
+table(exp.data$trial_type, exp.data$condition, exp.data$coop_binary)
+
+```
+
+```{r Check whether preferences were different from chance (0.50) - GROUP LEVEL}
+# GROUP LEVEL
+library(dplyr)
+exp_trials <- subset(exp.1.data, trial_type == "exp" & condition == "PP")
+
+chance_model <- glmer(
+  coop_binary ~ 1 + (1 | subject),
+  data = exp_trials,
+  family = binomial
+)
+
+summary(chance_model)
+
+plogis(fixef(chance_model))
+
+# Odds ratio for intercept-only chance model
+OR <- exp(fixef(chance_model))
+
+# Wald 95% CI for odds ratio
+CI <- exp(confint(chance_model, parm = "(Intercept)", method = "Wald"))
+
+data.frame(
+  OR = OR,
+  lower_95_CI = CI[, 1],
+  upper_95_CI = CI[, 2],
+  p_value = summary(chance_model)$coefficients["(Intercept)", "Pr(>|z|)"]
+)
+```
+
+
+```{r Check whether preferences were different from chance (0.50) - INDIVIDUAL LEVEL}
+# INDIVIDUAL LEVEL
+# bootstrap function
+bootstrap_subject <- function(x, R = 5000, chance = 0.5){
+  obs <- mean(x)
+  sims <- replicate(R, mean(sample(x, replace = TRUE)))
+  ci <- quantile(sims, c(.025, .975))
+  p <- 2 * min(
+    mean(sims >= chance),
+    mean(sims <= chance)
+  )
+  
+  data.frame(
+    prob = obs,
+    lower = ci[1],
+    upper = ci[2],
+    p_value = p
+  )
+}
+
+# run bootstrap for each subject
+results <- exp_trials %>%
+  group_by(subject) %>%
+  summarise(bootstrap_subject(coop_binary), .groups = "drop")
+
+results <- results %>%
+  mutate(
+    classification = case_when(
+      lower > 0.5 ~ "above chance",
+      upper < 0.5 ~ "below chance",
+      TRUE ~ "not different from chance"
+    )
+  )
+
+results
+
+table(exp_trials$coop_binary, exp_trials$subject)
+```
+```{r Visualize Preferences}
+
+results$order <- c(6, 5, 3, 2, 7,1 , 12, 11, 10, 4, 8, 9)
+
+results_plot <- results %>%
+  mutate(
+    subject = fct_reorder(subject, order, .desc = TRUE)
+  )
+
+results_plot <- results %>%
+  mutate(
+    subject = case_when(
+      subject %in% c("Griffin", "Logan", "Nkima") ~ paste0(subject, " (M)"),
+      TRUE                                        ~ paste0(subject, " (F)")
+    ),
+    subject = fct_reorder(subject, order, .desc = TRUE)
+  )
+
+ggplot(results_plot, aes(x = subject, y = prob,
+           color = classification,
+           shape = classification,
+           ymin = lower,
+           ymax = upper)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 3.5, linetype = "dashed", color = "grey1") +
+  geom_vline(xintercept = 7.5, linetype = "dashed", color = "grey1") +
+  geom_pointrange(size = 0.9, linewidth = 0.8) +
+  scale_color_manual(
+    breaks = c("below chance","not different from chance","above chance"),
+    values = c("below chance" = "#E69F00","not different from chance" = "#404040","above chance" = "#56B4E9"),
+    labels = c( "below chance" = "Below Chance", 
+                "not different from chance" = "No Difference from Chance",
+                "above chance" = "Above Chance"),
+    name = "Classification") +
+  scale_shape_manual(
+    breaks = c("below chance","not different from chance","above chance"),
+    values = c("below chance" = 17,"not different from chance" = 16,"above chance" = 15),
+    labels = c( "below chance" = "Below Chance", 
+                "not different from chance" = "No Difference from Chance",
+                "above chance" = "Above Chance"),
+    name = "Classification") +
+  labs(
+    x = "Subject",
+    y = "Proportion of Trials Cooperating") +
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.25)) +
+  annotate("text", x = 10, y = 0, label = "Group 1", angle = 90, size = 4) +
+  annotate("text", x = 5.5, y = 0, label = "Group 2", angle = 90, size = 4) +
+  annotate("text", x = 2, y = 0, label = "Group 3", angle = 90, size = 4) +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title = element_text(face = "bold", family = "Times"),
+    legend.title = element_text(face = "bold", family = "Times"),
+    legend.background = element_rect(fill = "transparent"),
+    legend.key = element_rect(fill = "transparent"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    axis.text = element_text(size = 11),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14)
+  )
+
+ggsave("Figure_2.png", height = 6, width = 8, units = "in")
+
+```
+
+```{r Check whether preferences were different from chance (0.50) - DYAD LEVEL}
+results_subject_partner <- exp_trials %>%
+  group_by(subject, partner) %>%
+  summarise(
+    bootstrap_subject(coop_binary),
+    n_trials = n(),
+    n_coop = sum(coop_binary, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    classification = case_when(
+      lower > 0.5 ~ "above chance",
+      upper < 0.5 ~ "below chance",
+      TRUE ~ "not different from chance"
+    )
+  )
+
+results_subject_partner
+
+results_subject_partner <- merge(
+  results_subject_partner,
+  demographics[, c("subject", "partner", "group", "CSI", "rank_relative", "kin", "dyad_sex")],
+  by = c("subject", "partner"),
+  all.x = TRUE
+)
+
+results_subject_partner <- results_subject_partner %>%
+  mutate(
+    dyad_label = interaction(subject, partner, sep = " × "),
+    dyad_label = fct_reorder(dyad_label, CSI, .desc = TRUE)
+  )
+
+ggplot(results_subject_partner, 
+       aes(x = interaction(subject, partner),
+           y = prob,
+           color = classification,
+           ymin = lower,
+           ymax = upper)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  geom_pointrange(size = 0.9, linewidth = 0.8) +
+  scale_color_manual(
+    values = c(
+      "above chance" = "#009E73",
+      "below chance" = "#CC79A7",
+      "not different from chance" = "#404040"
+    ),
+    labels = c(
+      "above chance" = "Above Chance",
+      "below chance" = "Below Chance",
+      "not different from chance" = "Not Different from Chance"
+    ),
+    name = "Classification"
+  ) +
+  labs(
+    x = "Subject × Partner",
+    y = "Proportion of Trials Cooperating"
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  coord_flip() +
+  theme_bw() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title  = element_text(face = "bold", family = "Times"),
+    legend.title = element_text(face = "bold", family = "Times"),
+    legend.background = element_rect(fill = "transparent"),
+    legend.key = element_rect(fill = "transparent"),
+    axis.text  = element_text(size = 11),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14)
+  )
+```
+
+```{r Check for Correlations between Social Factors of Interest}
+
+# Pearson’s correlation indicated no significant association between CSI and kinship 
+# (r = .10, 95% CI [−.16, .34], p = .46)
+cor.test(demographics$CSI, as.numeric(demographics$kin), method = "pearson")
+
+# Correlation between CSI and Kin
+ggplot(demographics, aes(x = kin, y = CSI)) +
+  geom_point() +
+  geom_abline(fullrange = FALSE) +
+  theme_classic()
+
+# Rank and Sex...duh
+ggplot(demographics, aes(x = subject_sex, y = subject_rank)) +
+  geom_point() +
+  geom_abline(fullrange = FALSE) +
+  theme_classic()
+
+```
+
+```{r Check for Collinearity between Fixed Effects}
+M1_vif <- lm(coop_binary ~ trial_type + condition + total_trial_subject_trialtype, data = exp.1.data)
+vif(M1_vif)
+```
+
+```{r Exp 1 Model 1 - Task Comprehension and Experience}
+# Scale numeric variables
+# Trial Number 
+exp.1.data$total_trial_z <- scale(exp.1.data$total_trial_subject,
+                                  center = TRUE, scale = TRUE)
+exp.1.data$total_trial_condition_z <- scale(exp.1.data$total_trial_subject_condition,
+                                  center = TRUE, scale = TRUE)
+exp.1.data$total_trial_trial_type_z <- scale(exp.1.data$total_trial_subject_trialtype,
+                                  center = TRUE, scale = TRUE)
+
+# CSI
+exp.1.data$CSI_z <- scale(exp.1.data$CSI,
+                                  center = TRUE, scale = TRUE)
+
+# Null Model 1
+NULL_EXP1 <- glmer(coop_binary ~ (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.1.data)
+
+# Model 1
+M1 <- glmer(coop_binary ~ trial_type * condition + total_trial_trial_type_z*trial_type + 
+                (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.1.data,
+        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+anova(NULL_EXP1, M1, test = "Chisq")
+
+```
+```{r Model 1 Diagnostics Check}
+library(DHARMa)
+
+M1@optinfo$conv$lme4$messages # Should return NULL
+isSingular(M1, tol = 1e-4) # Should return FALSE
+VarCorr(M1) # Inspects Random Effect Variances
+
+set.seed(123)
+sim_M1 <- simulateResiduals(
+  fittedModel = M1,
+  n = 1000
+)
+plot(sim_M1) # should follow diagonal and all tests should be N.S.
+
+plotResiduals(sim_M1, exp.1.data$total_trial_trial_type_z)
+plotResiduals(sim_M1, exp.1.data$condition)
+
+```
+
+
+```{r Model 1 Summary and Interactions}
+# Compare to pre-registered model and compare to null model
+anova(NULL_EXP1, M1, test = "Chisq")
+
+summary(M1)
+
+Anova(M1, type = 3)
+
+library(sjPlot)
+tab_model(M1,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = FALSE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Predicting Joint Tray Selection from Relationship Variables")
+
+# Probe the Trial Type x Condition interaction
+EMM_M1 <- emmeans(M1, ~ trial_type * condition, type = "response")
+EMM_M1
+pairs(EMM_M1, by = "trial_type", adjust = "holm", type = "response")
+
+# Probe the Trial Type x Trial Number interaction
+learning_slopes <- emtrends(M1, ~ trial_type, var = "total_trial_trial_type_z")
+learning_slopes
+pairs(learning_slopes, adjust = "holm")
+learning_OR <- summary(learning_slopes, infer = TRUE)
+learning_OR$OR <- exp(learning_OR$total_trial_trial_type_z.trend)
+learning_OR
+
+rm(EMM_M1, learning_slopes, learning_OR)
+```
+
+```{r Figure 3 Visualization}
+# Summarize the data to get proportions
+library(dplyr)
+coop_exp1 <- exp.1.data %>%
+  group_by(subject, partner, trial_type, condition) %>%
+  dplyr::summarise(
+    coop_count = sum(tray == "coop"),
+    total = n(),
+    prop_coop = coop_count / total
+  ) %>%
+  ungroup()
+
+library(Rmisc)
+
+# Compute mean and 95% CI by trial type and condition
+coop_summary_exp_1 <- summarySE(
+  data = coop_exp1,
+  measurevar = "prop_coop",
+  groupvars = c("trial_type", "condition"),
+  conf.interval = 0.95
+)
+
+detach("package:dplyr")
+detach("package:Rmisc")
+
+coop_summary_exp_1$condition <- factor(coop_summary_exp_1$condition, levels = c("PP", "PA"))
+
+ggplot(coop_summary_exp_1, aes(x = trial_type, 
+                         y = prop_coop, 
+                         fill = condition)) +
+  geom_bar(stat = "identity", 
+           position = position_dodge(width = 0.9),
+           color = "black") +
+  geom_errorbar(aes(ymin = prop_coop - ci, 
+                    ymax = prop_coop + ci),
+                width = 0.2,
+                position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c(
+    "exp" = "Experimental",
+    "joint_only" = "Joint-Only",
+    "solo_only" = "Solo-Only"
+  )) +
+  scale_fill_manual(
+    values = c("PP" = "#56B4E9", "PA" = "#404040"),
+    labels = c("PP" = "Partner Present", "PA" = "Partner Absent"),
+    name = "Condition"
+  ) +
+  scale_color_manual(values = c("PP" = "black", "PA" = "black")) +
+  labs(
+    x = "Trial type",
+    y = "Proportion of joint tray selections",
+    fill = "Condition"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.10),
+    breaks = seq(0, 1, by = 0.25)) +
+  # Experimental: PP vs PA ***
+  annotate("segment", x = 0.775, xend = 1.225, y = 0.75, yend = 0.75, linewidth = 0.6) +
+  annotate("text", x = 1.0, y = 0.78, label = "***", size = 5, family = "Times") +
+  # Joint-Only: PP vs PA ***
+  annotate("segment", x = 1.775, xend = 2.225, y = 1.06, yend = 1.06, linewidth = 0.6) +
+  annotate("text", x = 2.0, y = 1.09, label = "***", size = 5, family = "Times") +
+  # Solo-Only: PP vs PA N.S.
+  annotate("segment", x = 2.775, xend = 3.225, y = 0.30, yend = 0.30, linewidth = 0.6) +
+  annotate("text", x = 3.0, y = 0.33, label = "N.S.", size = 4, family = "Times") +
+  # Fix Error bar in Solo Only
+  annotate("segment", x = 3.225, xend = 3.225, y = 0.00, yend = 0.015, linewidth = 0.6) +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.title = element_text(face = "bold", family = "Times"),
+    legend.title = element_text(face = "bold", family = "Times"),
+    legend.position = c(0.85, 0.85),
+    legend.background = element_rect(fill = "transparent"),
+    legend.key = element_rect(fill = "transparent")
+  )
+
+ggsave("Figure_3.png", height = 5, width = 7, units = "in")
+```
+
+```{r Indiviudal Level Analysis of Joint Tray Selections}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(broom)
+
+trial_types <- c("exp", "joint_only", "solo_only")
+
+# Conduct Exact Fisher Tests for each monkey to determine which monkeys selected the Joint tray significantly more in the Partner Present condition compared to the Partner Absent condition
+test_results <- exp.1.data %>%
+  group_by(subject, trial_type) %>%      # group per subject × trial_type
+  nest() %>%                             # nest trials for each subject × trial_type
+  mutate(
+    tab = map(data, ~ table(.x$condition, .x$coop_binary)),
+    test = map(tab, ~ if(all(dim(.x) == 2)) fisher.test(.x) else NA),
+    p.value = map_dbl(test, ~ if(is.list(.x)) .x$p.value else NA_real_),
+    odds_ratio = map_dbl(test, ~ if(is.list(.x) && !is.null(.x$estimate)) .x$estimate else NA_real_)
+  ) %>%
+  select(subject, trial_type, p.value, odds_ratio)
+
+# Only look at the experimental trials, the other trial values are not meaningful for your Research Question
+test_results_exp <- test_results %>%
+  filter(trial_type == "exp")
+
+test_results_joint_only <- test_results %>%
+  filter(trial_type == "joint_only")
+
+rm(test_results)
+
+test_results_exp
+test_results_joint_only
+#Odds ratios > 1.00 with significant p-values indicate individuals who chose the joint tray significantly more in the PP than the PA condition
+```
+
+```{r Exp 1 Model 2 - Social Factors}
+# Subset to PP Condition ONLY {Since this is the only condition where dyad level parameters matter}
+exp.1.data.pp <- subset(exp.1.data, condition == "PP")
+
+exp.1.data.pp$dyad_order <- as.factor(exp.1.data.pp$dyad_order)
+
+# Null Model
+NULL_EXP1_M2 <- glmer(coop_binary ~ (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.1.data.pp)
+
+# Model 2
+M2 <- glmer(coop_binary ~ trial_type*CSI_z + trial_type*rank_relative + trial_type*kin + dyad_order +
+                (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.1.data.pp,
+        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+anova(NULL_EXP1_M2, M2, test = "Chisq")
+```
+
+```{r Model 2 Diagnostics}
+M2@optinfo$conv$lme4$messages # Should return NULL
+isSingular(M2, tol = 1e-4) # Should return FALSE
+VarCorr(M2) # Inspects Random Effect Variances
+
+set.seed(123)
+sim_M2 <- simulateResiduals(
+  fittedModel = M2,
+  n = 1000
+)
+plot(sim_M2) # should follow diagonal and all tests should be N.S.
+
+testUniformity(sim_M2)
+testDispersion(sim_M2)
+testOutliers(sim_M2)
+```
+
+
+```{r Model 2 Summary and Interactions}
+summary(M2)
+
+Anova(M2, type = 3)
+
+library(sjPlot)
+tab_model(M2,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = FALSE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Predicting Joint Tray Selection from Relationship Variables")
+```
+
+```{r Reciprocity Correlation}
+# Only examine the second pairings
+exp.1.recip <- subset(exp.1.data, dyad_order == 2)
+# Only examine the Partner Present Data
+exp.1.recip <- subset(exp.1.recip, condition == "PP")
+# Only examine the experimental trials
+exp.1.recip <- subset(exp.1.recip, trial_type == "exp")
+
+library(dplyr)
+reciprocity_summary <- exp.1.recip %>%
+  group_by(subject, partner) %>%
+  summarise(
+    joint_tray_prop = mean(coop_binary),           # proportion of joint choices
+    first_subject_coop_prop = first(first_subject_coop_prop)  # previous cooperation
+  ) %>%
+  ungroup()
+
+# Logistic regression
+reciprocity_model <- glm(coop_binary ~ first_subject_coop_prop,
+                   data = exp.1.recip,
+                   family = binomial)
+
+summary(reciprocity_model)
+
+tab_model(reciprocity_model,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = TRUE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Examining Reciprocity")
+
+rm(reciprocity_model, reciprocity_summary, exp.1.recip)
+```
+
+EXPERIMENT 2 -------------------------------------------------------------------
+
+```{r}
+head(exp.2.data)
+```
+
+```{r Testing for above chance performance on all trial types at the group-level}
+library(dplyr)
+exp2_PP <- subset(exp.2.data, condition == "PP")
+
+chance_model_exp2 <- exp2_PP %>%
+  group_split(trial_type)
+
+model_results <- lapply(chance_model_exp2, function(df){
+
+  m <- glmer(
+    coop_binary ~ 1 + (1 | subject),
+    data = df,
+    family = binomial
+  )
+  
+  data.frame(
+    trial_type = unique(df$trial_type),
+    log_odds = fixef(m)[1],
+    prob = plogis(fixef(m)[1]),
+    z = summary(m)$coefficients[1,3],
+    p_value = summary(m)$coefficients[1,4]
+  )
+})
+
+group_results <- bind_rows(model_results)
+
+group_results
+```
+
+```{r Test for above chance performance on all trial types at the individual level}
+bootstrap_subject <- function(x, R = 5000, chance = 0.5){
+  obs <- mean(x)
+
+  sims <- replicate(R, mean(sample(x, replace = TRUE)))
+
+  ci <- quantile(sims, c(.025, .975))
+
+  p <- 2 * min(
+    mean(sims >= chance),
+    mean(sims <= chance)
+  )
+
+  p <- min(p, 1)
+
+  data.frame(
+    prob = obs,
+    lower = ci[1],
+    upper = ci[2],
+    p_value = p
+  )
+}
+results_exp2 <- exp2_PP %>%
+  group_by(trial_type, subject) %>%
+  summarise(bootstrap_subject(coop_binary), .groups = "drop")
+
+results_exp2 <- results_exp2 %>%
+  mutate(
+    classification = case_when(
+      lower > 0.5 ~ "above chance",
+      upper < 0.5 ~ "below chance",
+      TRUE ~ "not different from chance"
+    )
+  )
+
+print(results_exp2)
+
+
+```
+
+```{r Export the individual outputs into a table}
+results_exp2 <- exp2_PP %>%
+  group_by(trial_type, subject) %>%
+  summarise(bootstrap_subject(coop_binary), .groups = "drop")
+
+table2_exp2 <- results_exp2 %>%
+  mutate(
+    trial_type_clean = recode(
+      trial_type,
+      "medium_medium" = "Medium/Medium",
+      "high_high" = "High/High",
+      "low_low" = "Low/Low",
+      "partner_high" = "Partner-High",
+      "partner_low" = "Partner-Low",
+      "altruism" = "Subject-Low"
+    ),
+    sig = case_when(
+      p_value < .001 ~ "***",
+      p_value < .01  ~ "**",
+      p_value < .05  ~ "*",
+      TRUE ~ ""
+    ),
+    preference = paste0(sprintf("%.2f", prob), sig)
+  ) %>%
+  select(subject, trial_type_clean, preference) %>%
+  pivot_wider(
+    names_from = trial_type_clean,
+    values_from = preference
+  ) %>%
+  select(
+    subject,
+    `Medium/Medium`,
+    `High/High`,
+    `Low/Low`,
+    `Partner-High`,
+    `Partner-Low`,
+    `Subject-Low`
+  )
+
+table2_exp2
+print(table2_exp2, n = Inf)
+```
+
+
+
+
+
+```{r Model 3 - Trial type and Condition}
+# Scale numeric variables
+# Trial Number 
+exp.2.data$total_trial_z <- scale(exp.2.data$total_trial_subject,
+                                  center = TRUE, scale = TRUE)
+exp.2.data$total_trial_condition_z <- scale(exp.2.data$total_trial_subject_condition,
+                                  center = TRUE, scale = TRUE)
+exp.2.data$total_trial_trial_type_z <- scale(exp.2.data$total_trial_subject_trialtype,
+                                  center = TRUE, scale = TRUE)
+# CSI
+exp.2.data$CSI_z <- scale(exp.2.data$CSI,
+                                  center = TRUE, scale = TRUE)
+
+# Null Model
+NULL_EXP2_M3 <- glmer(coop_binary ~ (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.2.data)
+
+M3 <- glmer(coop_binary ~ trial_type * condition + total_trial_trial_type_z*trial_type +
+                  (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.2.data,
+        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+anova(NULL_EXP2_M3, M3)
+
+```
+
+```{r Model 3 Diagnostics}
+M3_vif <- lm(coop_binary ~ trial_type + condition + total_trial_subject_trialtype, data = exp.2.data)
+vif(M3_vif)
+
+M3@optinfo$conv$lme4$messages # Should return NULL
+isSingular(M3, tol = 1e-4) # Should return FALSE
+VarCorr(M3) # Inspects Random Effect Variances
+
+set.seed(123)
+sim_M3 <- simulateResiduals(
+  fittedModel = M3,
+  n = 1000
+)
+plot(sim_M3) # should follow diagonal and all tests should be N.S.
+
+testUniformity(sim_M3)
+testDispersion(sim_M3)
+testOutliers(sim_M3)
+```
+
+```{r Model 3 Summary and Interactions}
+# Set reference level
+exp.2.data$trial_type <- relevel(exp.2.data$trial_type,
+                                 ref = "medium_medium")
+summary(M3)
+
+Anova(M3, type = 3)
+
+library(sjPlot)
+tab_model(M3,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = TRUE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Predicting Joint Tray Selection in Exp 2")
+
+# Probe significant Trial Type x Condition interaction for comprehension to see if PA is lower than PP
+EMM_M3_condition <- emmeans(M3, ~ trial_type * condition, type = "response")
+EMM_M3_condition
+pairs(EMM_M3_condition, by = "trial_type", adjust = "holm", type = "response")
+
+# Now test for inequity using planned comparisons
+EMM <- emmeans(M3, ~ trial_type | condition)
+ineq_contrasts <- contrast(
+  EMM,
+  method = "pairwise",
+  ref = "medium_medium",
+  by = "condition"
+)
+
+summary(ineq_contrasts,
+        type = "response",
+        infer = TRUE,
+        adjust = "holm")
+
+PP_inequity_contrasts <- subset(
+  summary(ineq_contrasts, type = "response", infer = TRUE, adjust = "holm"),
+  condition == "PP"
+)
+
+# Inequity Results
+print(PP_inequity_contrasts)
+
+PP_inequity_contrasts
+# Changes in condition
+# Probe the Trial Type x Trial Number interaction
+learning_slopes_M3 <- emtrends(M3, ~ trial_type, var = "total_trial_trial_type_z")
+learning_slopes_M3
+pairs(learning_slopes_M3, adjust = "holm")
+learning_OR_M3 <- summary(learning_slopes_M3, infer = TRUE)
+learning_OR_M3$OR <- exp(learning_OR_M3$total_trial_trial_type_z.trend)
+learning_OR_M3
+
+```
+
+
+```{r Figure 5 - Visualization of Model 3}
+library(dplyr)
+
+coop_exp2 <- exp.data %>%
+  filter(exp == 2) %>%
+  group_by(subject, partner, trial_type, condition) %>%
+  summarise(
+    coop_count = sum(tray == "coop"),
+    total = n(),
+    prop_coop = coop_count / total
+  ) %>%
+  ungroup()
+
+coop_exp2 <- coop_exp2 %>%
+  filter(trial_type != "solo_only")
+
+library(Rmisc)
+coop_summary_exp_2 <- summarySE(
+  data = coop_exp2,
+  measurevar = "prop_coop",
+  groupvars = c("trial_type", "condition"),
+  conf.interval = 0.95,
+  na.rm = TRUE)
+
+coop_summary_exp_2$equity <- ifelse(coop_summary_exp_2$trial_type == "medium_medium" | coop_summary_exp_2$trial_type == "high_high" | coop_summary_exp_2$trial_type == "low_low", "equal", "inequity")
+
+detach("package:Rmisc")
+detach("package:plyr")
+
+# Determines the order of the variables on the X-axis
+coop_summary_exp_2$trial_type <- factor(
+  coop_summary_exp_2$trial_type,
+  levels = c("high_high",
+             "low_low",
+             "medium_medium",
+             "partner_low",
+             "partner_high",
+             "altruism"))
+
+# Figure 6: Absolute Value Low/Low High/High and Medium/Medium
+absolute_value_df <- subset(coop_summary_exp_2, trial_type == "high_high" | trial_type == "low_low" | trial_type == "medium_medium"| trial_type == "altruism")
+absolute_value_df$trial_type <- factor(absolute_value_df$trial_type, levels = c("altruism", "low_low", "medium_medium", "high_high"))
+absolute_value_df$condition <- factor(absolute_value_df$condition, levels = c("PP", "PA"))
+
+
+fig5 <- ggplot(absolute_value_df, aes(x = trial_type, 
+                         y = prop_coop, 
+                         fill = condition)) +
+          geom_bar(stat = "identity", 
+                   position = position_dodge(width = 0.9),
+                   color = "black") +
+          geom_errorbar(aes(ymin = prop_coop - ci, 
+                            ymax = prop_coop + ci),
+                        width = 0.2,
+                        position = position_dodge(width = 0.9)) +
+          geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+          scale_x_discrete(labels = c(
+              "altruism" = "Subject Low\nPartner Medium",
+              "low_low" = "Low / Low",
+              "medium_medium" = "Medium / Medium",
+              "high_high" = "High / High"
+            )) +
+          scale_fill_manual(
+            values = c("PP" = "#56B4E9", "PA" = "#404040"), # optional: nicer colors
+            labels = c("PP" = "Partner Present", "PA" = "Partner Absent"),
+            name = "Condition"
+          ) +
+          scale_color_manual(values = c("PP" = "black", "PA" = "black")) +
+          labs(
+            x = "Joint Tray Rewards",
+            y = "",
+            fill = "Condition",
+            title = "") +
+          scale_y_continuous(limits = c(0, 1.20), breaks = seq(0, 1, by = 0.25)) +
+          # Signif Lines between Subject-Low and Medium/Medium
+          annotate("segment", x = 0.775, xend = 2.775, y = 0.75, yend = 0.75, linewidth = 0.6) +
+          annotate("text", x = 1.775, y = 0.78, label = "***", size = 5, family = "Times") +
+          # Signif Lines between Low/Low and Medium/Medium
+          annotate("segment", x = 1.775, xend = 2.775, y = 0.87, yend = 0.87, linewidth = 0.6) +
+          annotate("text", x = 2.275, y = 0.90, label = "***", size = 5, family = "Times") +
+          # Signif Lines between Medium/Medium and high/high
+          annotate("segment", x = 2.775, xend = 3.775, y = 1.13, yend = 1.13, linewidth = 0.6) +
+          annotate("text", x = 3.275, y = 1.16, label = "***", size = 5, family = "Times") +
+          theme_classic(base_size = 14) +
+          theme(panel.grid.major.y = element_blank(),
+            panel.grid.minor.y = element_blank(),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            axis.title = element_text(face = "bold", family = "Times"),
+            legend.title = element_text(size = 12, face = "bold", family = "Times"),
+            legend.text = element_text(size = 11, family = "Times"),
+            legend.key.size = unit(0.35, "cm"),
+            legend.spacing.y = unit(0.05, "cm"),
+            legend.margin = margin(0, 0, 0, 0),
+            legend.position = c(0.15, 0.90),
+            legend.background = element_rect(fill = "transparent"),
+            legend.key = element_rect(fill = "transparent"),
+            plot.tag = element_text(face = "bold", size = 12),
+            plot.tag.position = c(0.08, 0.985),
+            plot.title = element_text(face = "bold", hjust = 0.5, size = 11.5, family = "Times"))
+
+
+fig5
+
+ggsave("Figure_5.png", fig5, height = 5, width = 7, units = "in")
+
+```
+
+```{r Figure 6}
+# Figure 5: Comparing M/M to Partner High and Partner Low
+apple_apple <- subset(coop_summary_exp_2, trial_type == "partner_low" | trial_type == "partner_high" | trial_type == "medium_medium")
+apple_apple$trial_type <- factor(apple_apple$trial_type, levels = c("partner_low", "medium_medium", "partner_high"))
+apple_apple$condition <- factor(apple_apple$condition, levels = c("PP", "PA"))
+
+
+fig6 <- ggplot(apple_apple, aes(x = trial_type, 
+                         y = prop_coop, 
+                         fill = condition)) +
+          geom_bar(stat = "identity", 
+                   position = position_dodge(width = 0.9),
+                   color = "black") +
+          geom_errorbar(aes(ymin = prop_coop - ci, 
+                            ymax = prop_coop + ci),
+                        width = 0.2,
+                        position = position_dodge(width = 0.9)) +
+          geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+          scale_x_discrete(labels = c(
+            "partner_low" = "Subject Medium\nPartner Low",
+            "medium_medium" = "Subject Medium\nPartner Medium",
+            "partner_high" = "Subject Medium\nPartner High"
+          )) +
+          scale_fill_manual(
+            values = c("PP" = "#56B4E9", "PA" = "#404040"), # optional: nicer colors
+            labels = c("PP" = "Partner Present", "PA" = "Partner Absent"),
+            name = "Condition"
+          ) +
+          labs(
+            x = "Joint Tray Rewards",
+            y = "",
+            fill = "Condition",
+            title = ""
+          ) +
+          scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, by = 0.25)) +
+          # Signif Lines between Partner/Low and Medium/Medium
+          annotate("segment", x = 0.775, xend = 1.775, y = 0.85, yend = 0.85, linewidth = 0.6) +
+          annotate("text", x = 1.275, y = 0.89, label = "N.S.", size = 4) +
+          # Signif Lines between Partner/High and Medium/Medium
+          annotate("segment", x = 1.775, xend = 2.775, y = 0.70, yend = 0.70, linewidth = 0.6) +
+          annotate("text", x = 2.275, y = 0.73, label = "**", size = 5, family = "Times") +
+          theme_classic(base_size = 14) +
+          theme(panel.grid.major.y = element_blank(),
+            panel.grid.minor.y = element_blank(),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            axis.title = element_text(face = "bold", family = "Times"),
+            legend.title = element_text(size = 12, face = "bold", family = "Times"),
+            legend.text = element_text(size = 11, family = "Times"),
+            legend.position = c(0.85, 0.90),
+            legend.background = element_rect(fill = "transparent"),
+            legend.key = element_rect(fill = "transparent"),
+            plot.tag = element_text(face = "bold", size = 12),
+            plot.tag.position = c(0.08, 0.985),
+            plot.title = element_text(face = "bold", hjust = 0.5, size = 11.5, family = "Times"))
+
+fig6
+
+ggsave("Figure_6.png", fig6, height = 5, width = 7, units = "in")
+
+```
+  
+```{r Exp 2 Model 4 - Social Factors}
+# Subset to PP Condition ONLY {Since this is the only condition where dyad level parameters matter}
+exp.2.data.pp <- subset(exp.2.data, condition == "PP")
+
+exp.2.data.pp$dyad_order <- as.factor(exp.2.data.pp$dyad_order)
+
+# Null Model
+NULL_EXP2_M4 <- glmer(coop_binary ~ (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.2.data.pp)
+
+# Model 2
+M4 <- glmer(coop_binary ~ trial_type*CSI_z + trial_type*rank_relative + trial_type*kin + trial_type*dyad_order +
+                (1 | subject) + (1 | partner),
+        family = binomial(link = "logit"), data = exp.2.data.pp,
+        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+anova(NULL_EXP2_M4, M4)
+
+```
+```{r Model 4 Diagnostics}
+M4_vif <- lm(coop_binary ~ trial_type + CSI + rank_relative + kin + dyad_order, data = exp.2.data.pp)
+vif(M4_vif)
+
+M4@optinfo$conv$lme4$messages # Should return NULL
+isSingular(M4, tol = 1e-4) # Should return FALSE
+VarCorr(M4) # Inspects Random Effect Variances
+
+set.seed(123)
+sim_M4 <- simulateResiduals(
+  fittedModel = M4,
+  n = 1000
+)
+plot(sim_M4) # should follow diagonal and all tests should be N.S.
+
+testUniformity(sim_M4)
+testDispersion(sim_M4)
+testOutliers(sim_M4)
+```
+
+```{r Model 4 Summary and Interactions}
+summary(M4)
+
+Anova(M4, type = 3)
+
+library(sjPlot)
+tab_model(M4,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = FALSE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Predicting Joint Tray Selection from Relationship Variables - EXP 2")
+
+
+# Probe the Trial Type x Rank interaction
+EMM_M4_rank <- emmeans(M4, ~ trial_type * rank_relative, type = "response")
+EMM_M4_rank
+pairs(EMM_M4_rank, by = "trial_type", adjust = "holm", type = "response")
+confint(EMM_M4_rank, by = "trial_type", adjust = "holm", type = "response")
+
+# Probe the Trial Type x CSI interaction
+CSI_slopes <- emtrends(M4, ~ trial_type, var = "CSI_z")
+CSI_slopes
+pairs(CSI_slopes, adjust = "holm")
+CSI_OR <- summary(CSI_slopes, infer = TRUE)
+CSI_OR$OR <- exp(CSI_OR$CSI_z.trend)
+CSI_OR
+
+# Probe the Trial Type x Dyad Order interaction
+EMM_M4_order <- emmeans(M4, ~ trial_type * dyad_order, type = "response")
+EMM_M4_order
+pairs(EMM_M4_order, by = "trial_type", adjust = "holm", type = "response")
+confint(pairs(EMM_M4_order, by = "trial_type", adjust = "holm", type = "response"))
+```
+
+
+# Exp 1 and Exp 2
+```{r Did preferences in Med/Med trials differ between Exp 1 sessions and Exp 2 sessions}
+library(dplyr)
+exp_compare <- exp.data %>%
+  filter(
+    (exp == "1" & trial_type == "exp") |
+    (exp == "2" & trial_type == "medium_medium")
+  )
+
+M_exp_compare <- glmer(coop_binary ~ exp*condition + (1 | subject) + (1 | partner),
+  data = exp_compare,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa",
+                         optCtrl = list(maxfun = 200000))
+)
+
+
+summary(M_exp_compare)
+
+Anova(M_exp_compare, type = 3)
+
+library(sjPlot)
+tab_model(M_exp_compare,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = FALSE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "Logistic Regression Predicting Joint Tray Selection between Exp 1 and Exp 2")
+
+EMM_M3 <- emmeans(M_exp_compare, ~ exp * condition, type = "response")
+EMM_M3
+pairs(EMM_M3, by = "condition", adjust = "holm", type = "response")
+```
+
+
+
+
